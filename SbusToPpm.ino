@@ -151,16 +151,15 @@ AD7 -> GND	unused yet
 #endif
 
 
+#define IDLE			0	// idle
+#define PULSING			1	// generating PPM pulses
+
+
 #define	ONE_TO_FOUR		0
 #define	FIVE_TO_EIGHT		1
 #define	NINE_TO_TWELVE		2
 #define	THIRTEEN_TO_SIXTEEN	3
 #define	END_PULSES		4
-
-
-// UART states
-#define IDLE			0	// idle state, both transmit and receive possible
-#define PULSING			1	// PPM pulses
 
 
 #define SBUS_START_BYTE_VALUE	0x0F
@@ -229,32 +228,33 @@ uint8_t Bits[NUMBER_CHANNELS] = {
 	1 << BIT_ADC3
 };
 
-uint16_t FailsafeTimes[NUMBER_CHANNELS];
-uint16_t PulseTimes[NUMBER_CHANNELS];
 
-static volatile uint8_t UARTState = IDLE;
+static volatile uint16_t LastRcv = 0;
 
-uint8_t EightOnly = 0;
-uint8_t ChannelSwap = 0;
+static volatile uint8_t PulseOutState = IDLE;
 
-uint8_t PulsesIndex = 0;
+static uint8_t PulsesIndex = 0;
 
+static uint16_t FailsafeTimes[NUMBER_CHANNELS];
+static uint16_t PulseTimes[NUMBER_CHANNELS];
 
-uint8_t Sbuffer[SBUS_BUF_LEN] = {0};
-uint8_t Sindex = 0;
-volatile uint16_t LastRcv = 0;
+static uint8_t EightOnly = 0;
+static uint8_t ChannelSwap = 0;
 
-uint32_t LastSbusReceived = 0;
-uint8_t SbusHasBeenReceived = 0;
+static uint8_t Sbuffer[SBUS_BUF_LEN] = {0};
+static uint8_t Sindex = 0;
 
-uint8_t SerialMode = 1;
+static uint32_t LastSbusReceived = 0;
+static uint8_t SbusHasBeenReceived = 0;
+
+static uint8_t SerialMode = 1;
 
 
 
 
 ISR(TIMER1_COMPA_vect)
 {
-	if (UARTState == PULSING) {
+	if (PulseOutState == PULSING) {
 		uint8_t *port;
 		uint8_t bit;
 		uint16_t index = PulsesIndex;
@@ -268,13 +268,12 @@ ISR(TIMER1_COMPA_vect)
 				*port &= ~bit;			// else clear it
 			index++;
 			PulsesIndex = index;			// next entry
-		}
-		if (index >= 8) {
+		} else {
 			DISABLE_TIMER_INTERRUPT();		// we have finished the 4 pulses
-			UARTState = IDLE;
+			PulseOutState = IDLE;
 		}
 	} else {
-		UARTState = IDLE;                           	// error, should not occur, going to a safe state
+		PulseOutState = IDLE;                           // error, should not occur, going to a safe state
 	}	
 }
 
@@ -356,7 +355,7 @@ uint32_t millis()
 
 void eeprom_write_byte_cmp(uint8_t dat, uint16_t pointer_eeprom)
 {
-  while(EECR & (1 << EEPE)) {}		// make sure EEPROM is ready
+  while(EECR & (1 << EEPE)) {}		// wait for EEPROM is ready
   
   EEAR = pointer_eeprom;
   EECR |= 1 << EERE;
@@ -457,8 +456,6 @@ static void initUart()
 	UCSR0A = 0;
 	PORTD |= 0x03;			// enable pullup
 	UCSR0B = (1 << RXEN0);		// enable receiver
-
-	UARTState = IDLE;		// set internal state variable
 }
 
 
@@ -513,6 +510,8 @@ void setup()
 	initBasic();
 	initUart();
 	initFailsave();
+
+	PulseOutState = IDLE;
 
 	sei();
 
@@ -614,22 +613,35 @@ static uint8_t processSBUSframe()
 }
 
 
-uint8_t findNextShortestPulse(uint16_t* times, uint16_t *m, uint8_t k)
+void setPulses(uint16_t* times, uint8_t k, uint8_t n, uint16_t time)
 {
+	uint16_t m;
 	uint8_t i;
 	uint8_t j = 0;
 	
-	*m = times[j];
+	m = times[j];
 	for (i = 1; i < 4; i++) {			// find next shortest pulse
 		if (times[i] < times[i-1]) {		// if this one is shorter
 			j = i;
-			*m = times[j];
+			m = times[j];
 		}
 	}
-	times[j] = 0xFFFF;				// make local copy very large			TODO maybe not for the last one ?
+	times[j] = 0xFFFF;				// make local copy very large
 	j += k;						// add offset
 	
-	return j;
+	Pulses[n+4].port  = Pulses[n].port = Ports[j];	// set the port for this pulse
+	Pulses[n+4].bit   = Pulses[n].bit = Bits[j];	// set the bit for this pulse
+	Pulses[n+4].start = 0;				// mark the end
+	Pulses[n].start   = 1;				// mark the start
+	if (n < 3) {
+		Pulses[n].nextTime   = time + DELAY20 * (n+1);
+		Pulses[n+3].nextTime = time + DELAY20 * n + m * PULSE_SCALE;
+	} else {
+		Pulses[n+3].nextTime = time + DELAY60 + m * PULSE_SCALE;
+		Pulses[n+4].nextTime = time + TIME_LONG;
+	}
+	
+	checkInput();
 }
 
 
@@ -637,9 +649,7 @@ void setPulseTimes(uint8_t quadruple)
 {
 	uint16_t *pulsePtr = PulseTimes;
 	uint16_t times[4];
-	uint16_t m;
 	uint8_t i;
-	uint8_t j = 0;
 	uint8_t k = 0;					// offset into Ports and Bits
 	
 	if (quadruple == FIVE_TO_EIGHT) {
@@ -667,50 +677,8 @@ void setPulseTimes(uint8_t quadruple)
 	uint16_t time = TCNT1 + DELAY150;		// start the pulses in 150 uS
 	sei();						// gives time for this code to finish
 	
-							// part 1
-	j = findNextShortestPulse(times, &m, k);	// find shortest pulse
-	Pulses[4].port = Pulses[0].port = Ports[j];	// set the port for this pulse
-	Pulses[4].bit = Pulses[0].bit = Bits[j];	// set the bit for this pulse
-	Pulses[0].start = 1;				// mark the start
-	Pulses[4].start = 0;				// mark the end
-	Pulses[0].nextTime = time + DELAY20;		// next pulse starts in 20 uS
-	Pulses[3].nextTime = time + m * PULSE_SCALE;	// this pulse ends at this time
-	
-	checkInput();
-	
-							// part 2
-	j = findNextShortestPulse(times, &m, k);	// find shortest pulse
-	Pulses[5].port = Pulses[1].port = Ports[j];	// set the port for this pulse
-	Pulses[5].bit = Pulses[1].bit = Bits[j];	// set the bit for this pulse
-	Pulses[1].start = 1;				// mark the start
-	Pulses[5].start = 0;				// mark the end
-	Pulses[1].nextTime = time + DELAY40;		// next pulse starts in another 20 uS
-	Pulses[4].nextTime = time + DELAY20 + m * PULSE_SCALE;	// this pulse ends at this time
-
-	checkInput();
-	
-							// part 3
-	j = findNextShortestPulse(times, &m, k);	// find shortest pulse
-	Pulses[6].port = Pulses[2].port = Ports[j];	// set the port for this pulse
-	Pulses[6].bit = Pulses[2].bit = Bits[j];	// set the bit for this pulse
-	Pulses[2].start = 1;				// mark the start
-	Pulses[6].start = 0;				// mark the end
-	Pulses[2].nextTime = time + DELAY60;		// next pulse starts in another 20 uS
-	Pulses[5].nextTime = time + DELAY40 + m * PULSE_SCALE;	// this pulse ends at this time
-
-	checkInput();
-	
-							// part 4
-	j = findNextShortestPulse(times, &m, k);	// find shortest pulse
-	Pulses[7].port = Pulses[3].port = Ports[j];	// set the port for this pulse
-	Pulses[7].bit = Pulses[3].bit = Bits[j];	// set the bit for this pulse
-	Pulses[3].start = 1;				// mark the start
-	Pulses[7].start = 0;				// mark the end
-	Pulses[6].nextTime = time + DELAY60 + m * PULSE_SCALE;		// TODO ???
-	Pulses[7].nextTime = time + TIME_LONG;		// some time well ahead, shouldn't be used
-
-	checkInput();
-	
+	for (i = 0; i < 4; i++)
+		setPulses(times, k, i, time);		// set the pulses
 	
 	cli();
 	OCR1A = time;					// set for first interrupt
@@ -718,7 +686,7 @@ void setPulseTimes(uint8_t quadruple)
 	
 	CLEAR_TIMER_INTERRUPT();			// clear flag in case it is set
 	PulsesIndex = 0;				// start here
-	UARTState = PULSING;
+	PulseOutState = PULSING;
 	ENABLE_TIMER_INTERRUPT();			// allow interrupt to run
 }
 
@@ -747,15 +715,13 @@ int main()
 #endif
 			if (Sindex >= SBUS_PACKET_LEN) {
 				if (processSBUSframe()) {
-					if (SerialMode) {			// if serial 100000 baud
-						if (UARTState == IDLE) {
-							current_micros = micros();
-							uint16_t rate = 17900;
-							if (EightOnly)
-								rate = 8900;
-							if ((current_micros - LastPulsesStartTime ) > rate)
-								LastPulsesStartTime = current_micros - 21000;	// will start the pulses
-						}
+					if (SerialMode && PulseOutState == IDLE) {
+						current_micros = micros();
+						uint16_t rate = 17900;
+						if (EightOnly)
+							rate = 8900;
+						if ((current_micros - LastPulsesStartTime ) > rate)
+							LastPulsesStartTime = current_micros - 21000;	// will start the pulses
 					}
 				} else {
 					Sindex = 0;
@@ -804,7 +770,7 @@ int main()
 		
 		checkInput();
 
-		if (PulseStateMachine == END_PULSES && UARTState == IDLE)
+		if (PulseStateMachine == END_PULSES && PulseOutState == IDLE)
 			PulseStateMachine = ONE_TO_FOUR;
 
 		if ((millis() - LastSbusReceived) > 500)
