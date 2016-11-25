@@ -655,15 +655,16 @@ void setPulses(uint16_t* times, uint8_t k, uint8_t n, uint16_t time)
 	times[j] = 0xFFFF;				// make local copy very large
 	j += k;						// add offset
 	
-	Pulses[n+4].port  = Pulses[n].port = Ports[j];	// set the port for this pulse
-	Pulses[n+4].bit   = Pulses[n].bit = Bits[j];	// set the bit for this pulse
-	Pulses[n+4].start = 0;				// mark the end
+	Pulses[n+4].port  = Pulses[n].port  = Ports[j];	// set the port for this pulse
+	Pulses[n+4].bit   = Pulses[n].bit   = Bits[j];	// set the bit for this pulse
+	
 	Pulses[n].start   = 1;				// mark the start
+	Pulses[n+4].start = 0;				// mark the end
+
+	Pulses[n+3].nextTime = time + DELAY20 * n + m * PULSE_SCALE;
 	if (n < 3) {
 		Pulses[n].nextTime   = time + DELAY20 * (n+1);
-		Pulses[n+3].nextTime = time + DELAY20 * n + m * PULSE_SCALE;
 	} else {
-		Pulses[n+3].nextTime = time + DELAY60 + m * PULSE_SCALE;
 		Pulses[n+4].nextTime = time + TIME_LONG;
 	}
 	
@@ -729,6 +730,17 @@ int main(void)
 		cli();
 		TCnt = TCNT1;
 		sei();
+		
+		if ((micros() - Last16ChannelsStartTime) > 20000) {		// time for the first 4 pulses
+			if (PulseStateMachine == ONE_TO_FOUR) {
+				Last16ChannelsStartTime += 20000;
+				setPulseTimes(PulseStateMachine);		// first 4 pulses
+				PulseStateMachine = FIVE_TO_EIGHT;
+				Last04ChannelsStartTime = micros();
+			}
+		}
+		
+		readSBus();
 
 		if ((TCnt - LastRcv) > T_MS_500) {
 			if (SBusIndex >= SBUS_PACKET_LEN) {
@@ -747,17 +759,6 @@ int main(void)
 			} else {
 				if (SBusIndex && (TCnt - LastRcv) > T_MS_3000)
 					SBusIndex = 0;
-			}
-		}
-		
-		readSBus();
-		
-		if ((micros() - Last16ChannelsStartTime) > 20000) {		// time for the first 4 pulses
-			if (PulseStateMachine == ONE_TO_FOUR) {
-				Last16ChannelsStartTime += 20000;
-				setPulseTimes(PulseStateMachine);		// first 4 pulses
-				PulseStateMachine = FIVE_TO_EIGHT;
-				Last04ChannelsStartTime = micros();
 			}
 		}
 		
