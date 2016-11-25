@@ -6,6 +6,15 @@ SBus to PPM converter
 Massive refactoring (c) by Jörg-D. Rothfuchs
 
 
+Refactoring based on this code:
+	https://github.com/MikeBland/SbusToPpm
+
+
+Collection of helpful links:
+	https://developer.mbed.org/users/Digixx/notebook/futaba-s-bus-controlled-by-mbed/
+	https://github.com/sebseb7/SbusToPPM
+
+
 The protocol is 25 Byte long and is send every 14ms (analog mode) or 7ms (highspeed mode).
 
 One Byte = 1 startbit + 8 databit + 1 paritybit + 2 stopbit (8E2), baudrate = 100'000 bit/s, so one bit takes 10 microseconds.
@@ -32,6 +41,17 @@ flags:
 	bit0 = n/a					(0x01)
 
 endbyte = 00000000b (Prior to the s.bus2 capable receivers, and the R7003SB)
+
+For Futaba FASSTest modes there are other endbytes to consider (highest bit first):
+
+"FASSTest 18CH" mode
+00100000	0x04
+00101000	0x14
+00100100	0x24
+00101100	0x34
+
+"FASSTest 12CH" mode
+00010000	0x08
 
 
 Inverter:
@@ -165,6 +185,20 @@ AD7 -> GND	unused yet
 #define SBUS_START_BYTE_VALUE	0x0F
 #define SBUS_START_BYTE_INDEX	0
 
+
+/*
+For SBUS_END_BYTE_VALUE mention different endbytes by Futaba FASSTest modes (highest bit first):
+
+"FASSTest 18CH" mode
+00100000	0x04
+00101000	0x14
+00100100	0x24
+00101100	0x34
+
+"FASSTest 12CH" mode
+00010000	0x08
+*/
+
 #define SBUS_END_BYTE_VALUE	0x00
 #define SBUS_END_BYTE_INDEX	24
 
@@ -241,11 +275,11 @@ static uint16_t PulseTimes[NUMBER_CHANNELS];
 static uint8_t EightOnly = 0;
 static uint8_t ChannelSwap = 0;
 
-static uint8_t Sbuffer[SBUS_BUF_LEN] = {0};
-static uint8_t Sindex = 0;
+static uint8_t SBusBuffer[SBUS_BUF_LEN] = {0};
+static uint8_t SBusIndex = 0;
 
-static uint32_t LastSbusReceived = 0;
-static uint8_t SbusHasBeenReceived = 0;
+static uint32_t LastSBusReceived = 0;
+static uint8_t SBusHasBeenReceived = 0;
 
 static uint8_t SerialMode = 1;
 
@@ -253,33 +287,27 @@ static uint8_t SerialMode = 1;
 
 
 ISR(TIMER1_COMPA_vect)
-{
+{			
 	if (PulseOutState == PULSING) {
-		uint8_t *port;
-		uint8_t bit;
-		uint16_t index = PulsesIndex;
-		if (index < 8) {
-			port = Pulses[index].port;		// output port to modify
-			bit = Pulses[index].bit;		// output bit to modify
-			OCR1A = Pulses[index].nextTime;		// time of next action
-			if (Pulses[index].start)		// if starting pulse
-				*port |= bit;			// set the output
-			else
-				*port &= ~bit;			// else clear it
-			index++;
-			PulsesIndex = index;			// next entry
-		} else {
-			DISABLE_TIMER_INTERRUPT();		// we have finished the 4 pulses
+		if (PulsesIndex < 8) {
+			t_pulses *p = &Pulses[PulsesIndex];
+			OCR1A = p->nextTime;		// time of next action
+			if (p->start)			// if start
+				*p->port |= p->bit;	//   set the output
+			else				// if stop
+				*p->port &= ~p->bit;	//   clear the output
+			PulsesIndex++;			// next entry
+		}
+		// TODO
+		if (PulsesIndex >= 8) {
+			DISABLE_TIMER_INTERRUPT();	// 4 pulses are finished
 			PulseOutState = IDLE;
 		}
-	} else {
-		PulseOutState = IDLE;                           // error, should not occur, going to a safe state
 	}	
 }
 
 
-// replacement millis() and micros()
-// polling, no interrupts
+// replacement of millis() and micros(), polling, no interrupts
 // micros() MUST be called at least once every 4 milliseconds
 
 uint32_t TotalMillis;	// TODO
@@ -505,24 +533,23 @@ void initBasic()
 }
 
 
-void setup()
+void setup(void)
 {	
 	initBasic();
 	initUart();
 	initFailsave();
-
-	PulseOutState = IDLE;
-
-	sei();
 
 	if ((PINC & 0x20) == 0)		// AD5 to GND ?
 		ChannelSwap = 1;
 
 	if ((PIND & 0x02) == 0)		// PD1 to GND ?		PD1 ~ TX	TODO check for floating
 		EightOnly = 1;
+
+	sei();
 }
 
 
+// TODO
 void checkFailsafePin()
 {
 	static uint32_t LastPinTime = 0;
@@ -549,42 +576,43 @@ void checkFailsafePin()
 }
 
 
-void checkInput()
+void readSBus()
 {
 	uint8_t sbus_byte;
 	
 	while (UCSR0A & (1 << RXC0)) {
 		sbus_byte = UDR0;
-		if (Sindex || (sbus_byte == SBUS_START_BYTE_VALUE)) {		// data byte or startbyte	startbyte = 11110000b (0xF0)	The highest bit is send first, so data "00000000001" = 1024
-			Sbuffer[Sindex] = sbus_byte;
+		if (SBusIndex || (sbus_byte == SBUS_START_BYTE_VALUE)) {	// if data byte or startbyte
+			SBusBuffer[SBusIndex] = sbus_byte;
 			cli();
 			LastRcv = TCNT1;
 			sei();
-			if (Sindex < SBUS_BUF_LEN_LAST)
-				Sindex++;
+			if (SBusIndex < SBUS_BUF_LEN_LAST)
+				SBusIndex++;
 		}
 	}
 }
 
 
-static uint8_t processSBUSframe()
+static uint8_t processSBusFrame()
 {
 	uint8_t inputbitsavailable = 0;
 	uint8_t i;
 	uint32_t inputbits = 0;
-	uint8_t *sbus = Sbuffer;
+	uint8_t *sbus = SBusBuffer;
 	uint16_t pulse;
-	
-	if (Sindex < SBUS_PACKET_LEN)
+
+	if (SBusIndex < SBUS_PACKET_LEN)
 		return 0;
-		
+
+	// TODO mask the FASSTest bits for working with Futaba "FASSTest 18/12CH" mode
 	if (sbus[SBUS_END_BYTE_INDEX] != SBUS_END_BYTE_VALUE) {
-		Sindex = 0;
+		SBusIndex = 0;
 		return 0;		// not a valid SBUS frame
 	}
 
 	if (*sbus++ != SBUS_START_BYTE_VALUE) {
-		Sindex = 0;
+		SBusIndex = 0;
 		return 0;		// not a valid SBUS frame
 	}
 
@@ -592,8 +620,8 @@ static uint8_t processSBUSframe()
 	PORTC ^= 0x20;
 #endif
 
-	LastSbusReceived = millis();
-	SbusHasBeenReceived = 1;
+	LastSBusReceived = millis();
+	SBusHasBeenReceived = 1;
 
 	for (i = 0; i < NUMBER_CHANNELS; i++) {
 		while (inputbitsavailable < 11) {
@@ -607,7 +635,7 @@ static uint8_t processSBUSframe()
 		inputbitsavailable -= 11;
 		inputbits >>= 11;
 	}
-	Sindex = 0;
+	SBusIndex = 0;
 	
 	return 1;
 }
@@ -641,26 +669,28 @@ void setPulses(uint16_t* times, uint8_t k, uint8_t n, uint16_t time)
 		Pulses[n+4].nextTime = time + TIME_LONG;
 	}
 	
-	checkInput();
+	readSBus();
 }
 
 
-void setPulseTimes(uint8_t quadruple)
+void setPulseTimes(uint8_t PulseStateMachine)
 {
 	uint16_t *pulsePtr = PulseTimes;
 	uint16_t times[4];
 	uint8_t i;
 	uint8_t k = 0;					// offset into Ports and Bits
 	
-	if (quadruple == FIVE_TO_EIGHT) {
+	if (PulseStateMachine == FIVE_TO_EIGHT) {
 		pulsePtr += 4;				// move on to second 4 pulses
 		k = 4;
-	} else if (quadruple == NINE_TO_TWELVE) {
+	} else if (PulseStateMachine == NINE_TO_TWELVE) {
 		pulsePtr += 8;				// move on to third 4 pulses
 		k = 8;
-	} else if (quadruple == THIRTEEN_TO_SIXTEEN) {
+	} else if (PulseStateMachine == THIRTEEN_TO_SIXTEEN) {
 		pulsePtr += 12;				// move on to fourth 4 pulses
 		k = 12;
+	} else if (PulseStateMachine == END_PULSES) {
+		return;
 	}
 
 	if (ChannelSwap) {				// swap chanels 1-8 and 9-16
@@ -691,18 +721,18 @@ void setPulseTimes(uint8_t quadruple)
 }
 
 
-int main()
+int main(void)
 {
 	uint8_t PulseStateMachine = ONE_TO_FOUR;
-	uint16_t LastPulsesStartTime;
-	uint16_t current_micros;
+	uint32_t current_micros;
+	uint32_t Last16ChannelsStartTime = 0;
+	uint32_t Last04ChannelsStartTime = 0;
 	uint16_t TCnt;
-	unsigned long Timer = 0;
 
 	setup();
 	
 	for(;;) {
-		checkInput();
+		readSBus();
 		
 		cli();
 		TCnt = TCNT1;
@@ -713,75 +743,75 @@ int main()
 #elif F_CPU == 8000000L   // 8MHz clock
 		if ((TCnt - LastRcv) > 4000) {
 #endif
-			if (Sindex >= SBUS_PACKET_LEN) {
-				if (processSBUSframe()) {
+			if (SBusIndex >= SBUS_PACKET_LEN) {
+				if (processSBusFrame()) {
 					if (SerialMode && PulseOutState == IDLE) {
 						current_micros = micros();
 						uint16_t rate = 17900;
 						if (EightOnly)
 							rate = 8900;
-						if ((current_micros - LastPulsesStartTime ) > rate)
-							LastPulsesStartTime = current_micros - 21000;	// will start the pulses
+						if ((current_micros - Last16ChannelsStartTime ) > rate)
+							Last16ChannelsStartTime = current_micros - 21000;	// will start the pulses
 					}
 				} else {
-					Sindex = 0;
+					SBusIndex = 0;
 				}
 			} else {
-				if (Sindex && (TCnt - LastRcv) > 48000)		// 3 mS timeout		TODO 48000 depends on F_CPU
-					Sindex = 0;
+				if (SBusIndex && (TCnt - LastRcv) > 48000)					// 3 mS timeout		TODO 48000 depends on F_CPU
+					SBusIndex = 0;
 			}
 		}
 		
-		checkInput();
+		readSBus();
 		
-		if ((micros() - LastPulsesStartTime) > 20000) {			// time for the first 4 pulses
+		if ((micros() - Last16ChannelsStartTime) > 20000) {		// time for the first 4 pulses
 			if (PulseStateMachine == ONE_TO_FOUR) {
-				LastPulsesStartTime += 20000;
+				Last16ChannelsStartTime += 20000;
+				setPulseTimes(PulseStateMachine);		// first 4 pulses
 				PulseStateMachine = FIVE_TO_EIGHT;
-				setPulseTimes(ONE_TO_FOUR);			// first 4 pulses
-				Timer = micros();
+				Last04ChannelsStartTime = micros();
 			}
 		}
 		
-		checkInput();
+		readSBus();
 		
-		if ((micros() - Timer) > 3000) {				// time for the next 4 pulses
+		if ((micros() - Last04ChannelsStartTime) > 3000) {		// time for the next 4 pulses
 			switch (PulseStateMachine) {
 				case FIVE_TO_EIGHT:
+					setPulseTimes(PulseStateMachine);	// second 4 pulses
 					if (EightOnly)
 						PulseStateMachine = END_PULSES;
 					else
 						PulseStateMachine = NINE_TO_TWELVE;
-					setPulseTimes(FIVE_TO_EIGHT);		// second 4 pulses
-					Timer = micros();
+					Last04ChannelsStartTime = micros();
 				break;
 				case NINE_TO_TWELVE:
+					setPulseTimes(PulseStateMachine);	// third 4 pulses
 					PulseStateMachine = THIRTEEN_TO_SIXTEEN;
-					setPulseTimes(NINE_TO_TWELVE);		// third 4 pulses
-					Timer = micros();
+					Last04ChannelsStartTime = micros();
 				break;
 				case THIRTEEN_TO_SIXTEEN:
+					setPulseTimes(PulseStateMachine);	// fourth 4 pulses
 					PulseStateMachine = END_PULSES;
-					setPulseTimes(THIRTEEN_TO_SIXTEEN);	// fourth 4 pulses
-					Timer = micros();
+					Last04ChannelsStartTime = micros();
 				break;
 			}
 		}
 		
-		checkInput();
+		readSBus();
 
 		if (PulseStateMachine == END_PULSES && PulseOutState == IDLE)
 			PulseStateMachine = ONE_TO_FOUR;
 
-		if ((millis() - LastSbusReceived) > 500)
+		if ((millis() - LastSBusReceived) > 500)
 			enterFailsafe();
 		
-		if (SbusHasBeenReceived == 0 && ( millis() - LastSbusReceived) > 100) {
-			LastSbusReceived = millis();
+		if (SBusHasBeenReceived == 0 && ( millis() - LastSBusReceived) > 100) {
+			LastSBusReceived = millis();
 			setSerialMode(!SerialMode);			// toggle mode for auto-detect
 		}
 		
-		checkInput();
+		readSBus();
 		
 		checkFailsafePin();
 	}
