@@ -1,6 +1,6 @@
 /*
 
-SBus to PPM converter
+SBus to PWM converter
 
 
 Massive refactoring (c) by Jörg-D. Rothfuchs
@@ -172,7 +172,7 @@ AD7 -> GND	unused yet
 
 
 #define IDLE			0	// idle
-#define PULSING			1	// generating PPM pulses
+#define PULSING			1	// generating PWM pulses
 
 
 #define	ONE_TO_FOUR		0

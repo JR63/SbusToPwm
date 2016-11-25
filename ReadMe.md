@@ -1,4 +1,4 @@
-Arduino used as SBUS to 16-channels PPM decoder
+Arduino used as SBUS to 16-channels PWM decoder
 
 Analog input A4 is used to set the failsafe times to the current received pulses.
 Connect a switch to this and connect to ground to set the failsafe.
