@@ -154,14 +154,22 @@ AD7 -> GND	unused yet
 #define BIT_ADC5		5
 
 
-#if F_CPU == 16000000L  // 16MHz clock
+#if F_CPU == 16000000L 		// 16MHz clock
+#define BAUD_57600		16
+#define BAUD_100000		9
+#define T_MS_3000		48000
+#define T_MS_500		8000
 #define DELAY150		2400
 #define DELAY20			320
 #define DELAY40			640
 #define DELAY60			960
 #define TIME_LONG		40000
 #define PULSE_SCALE		16
-#elif F_CPU == 8000000L   // 8MHz clock
+#elif F_CPU == 8000000L		// 8MHz clock
+#define BAUD_57600		8
+#define BAUD_100000		4
+#define T_MS_3000		24000
+#define T_MS_500		4000
 #define DELAY150		1200
 #define DELAY20			160
 #define DELAY40			320
@@ -297,9 +305,7 @@ ISR(TIMER1_COMPA_vect)
 			else				// if stop
 				*p->port &= ~p->bit;	//   clear the output
 			PulsesIndex++;			// next entry
-		}
-		// TODO
-		if (PulsesIndex >= 8) {
+		} else {
 			DISABLE_TIMER_INTERRUPT();	// 4 pulses are finished
 			PulseOutState = IDLE;
 		}
@@ -427,19 +433,11 @@ void readFailsafe()
 // mode 1 -> serial 100000 baud
 void setSerialMode(uint8_t mode)
 {
-	if (mode == 0) {		// 57600
-#if F_CPU == 16000000L			// 16 MHz clock                                                  
-		UBRR0L = 16;		// for 57600 baud, use 9 for 100000 baud
-#elif F_CPU == 8000000L			//  8 MHz clock
-		UBRR0L = 8;		// for 57600 baud, use 4 for 100000 baud
-#endif		
+	if (mode == 0) {		// 57600 baud                                                
+		UBRR0L = BAUD_57600;
 		UCSR0C = (1 << UCSZ00) | (1 << UCSZ01 );
-	} else {
-#if F_CPU == 16000000L			// 16 MHz clock                                                  
-		UBRR0L = 9;		// for 100000 baud
-#elif F_CPU == 8000000L			//  8 MHz clock
-		UBRR0L = 4;		// for 100000 baud
-#endif		
+	} else {			// 100000 baud                                                
+		UBRR0L = BAUD_100000;
 		UCSR0C = (1 << UCSZ00) | (1 << UCSZ01 ) | (1 << UPM01);
 		UCSR0B &= ~TXEN0;
 	}
@@ -620,9 +618,6 @@ static uint8_t processSBusFrame()
 	PORTC ^= 0x20;
 #endif
 
-	LastSBusReceived = millis();
-	SBusHasBeenReceived = 1;
-
 	for (i = 0; i < NUMBER_CHANNELS; i++) {
 		while (inputbitsavailable < 11) {
 			inputbits |= (uint32_t)*sbus++ << inputbitsavailable;
@@ -635,6 +630,9 @@ static uint8_t processSBusFrame()
 		inputbitsavailable -= 11;
 		inputbits >>= 11;
 	}
+
+	LastSBusReceived = millis();
+	SBusHasBeenReceived = 1;
 	SBusIndex = 0;
 	
 	return 1;
@@ -678,20 +676,14 @@ void setPulseTimes(uint8_t PulseStateMachine)
 	uint16_t *pulsePtr = PulseTimes;
 	uint16_t times[4];
 	uint8_t i;
-	uint8_t k = 0;					// offset into Ports and Bits
+	uint8_t k;					// offset into Ports and Bits
 	
-	if (PulseStateMachine == FIVE_TO_EIGHT) {
-		pulsePtr += 4;				// move on to second 4 pulses
-		k = 4;
-	} else if (PulseStateMachine == NINE_TO_TWELVE) {
-		pulsePtr += 8;				// move on to third 4 pulses
-		k = 8;
-	} else if (PulseStateMachine == THIRTEEN_TO_SIXTEEN) {
-		pulsePtr += 12;				// move on to fourth 4 pulses
-		k = 12;
-	} else if (PulseStateMachine == END_PULSES) {
+	if (PulseStateMachine == END_PULSES)
 		return;
-	}
+	
+	i = PulseStateMachine * 4;
+	pulsePtr += i;
+	k = i;
 
 	if (ChannelSwap) {				// swap chanels 1-8 and 9-16
 		if (k >= 8)
@@ -738,16 +730,12 @@ int main(void)
 		TCnt = TCNT1;
 		sei();
 
-#if F_CPU == 16000000L  // 16MHz clock
-		if ((TCnt - LastRcv) > 8000) {
-#elif F_CPU == 8000000L   // 8MHz clock
-		if ((TCnt - LastRcv) > 4000) {
-#endif
+		if ((TCnt - LastRcv) > T_MS_500) {
 			if (SBusIndex >= SBUS_PACKET_LEN) {
 				if (processSBusFrame()) {
 					if (SerialMode && PulseOutState == IDLE) {
 						current_micros = micros();
-						uint16_t rate = 17900;
+						uint16_t rate = 17900;						// TODO 17900 or 19900 ?
 						if (EightOnly)
 							rate = 8900;
 						if ((current_micros - Last16ChannelsStartTime ) > rate)
@@ -757,7 +745,7 @@ int main(void)
 					SBusIndex = 0;
 				}
 			} else {
-				if (SBusIndex && (TCnt - LastRcv) > 48000)					// 3 mS timeout		TODO 48000 depends on F_CPU
+				if (SBusIndex && (TCnt - LastRcv) > T_MS_3000)
 					SBusIndex = 0;
 			}
 		}
