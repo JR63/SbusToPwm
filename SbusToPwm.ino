@@ -226,9 +226,8 @@ For SBUS_END_BYTE_VALUE mention different endbytes by Futaba FASSTest modes (hig
 
 struct t_pulses {
 	uint8_t *port;
-	uint8_t bit;	
-	uint8_t start;
-	uint16_t nextTime;
+	uint8_t bit;
+	uint16_t fire;
 } Pulses[8];
 
 
@@ -295,21 +294,20 @@ static uint8_t SerialMode = 1;
 
 
 ISR(TIMER1_COMPA_vect)
-{			
-	if (PulseOutState == PULSING) {
-		if (PulsesIndex < 8) {
-			t_pulses *p = &Pulses[PulsesIndex];
-			OCR1A = p->nextTime;		// time of next action
-			if (p->start)			// if start
-				*p->port |= p->bit;	//   set the output
-			else				// if stop
-				*p->port &= ~p->bit;	//   clear the output
-			PulsesIndex++;			// next entry
-		} else {
-			DISABLE_TIMER_INTERRUPT();	// 4 pulses are finished
-			PulseOutState = IDLE;
-		}
-	}	
+{
+	if (PulsesIndex < 8) {
+		t_pulses *p = &Pulses[PulsesIndex];
+		OCR1A = p->fire;		// next shot
+		if (PulsesIndex++ < 4)		// if start
+			*p->port |= p->bit;	//   set the output
+		else				// if stop
+			*p->port &= p->bit;	//   clear the output
+	}
+		
+	if (PulsesIndex >= 8) {
+		DISABLE_TIMER_INTERRUPT();	// 4 pulses are finished
+		PulseOutState = IDLE;
+	}
 }
 
 
@@ -647,25 +645,24 @@ void setPulses(uint16_t* times, uint8_t k, uint8_t n, uint16_t time)
 	
 	m = times[j];
 	for (i = 1; i < 4; i++) {			// find next shortest pulse
-		if (times[i] < times[i-1]) {		// if this one is shorter
+		if (times[i] < m) {			// if this one is shorter
 			j = i;
 			m = times[j];
 		}
 	}
-	times[j] = 0xFFFF;				// make local copy very large
+	times[j] = 0xFFFF;				// mark as done
 	j += k;						// add offset
 	
 	Pulses[n+4].port  = Pulses[n].port  = Ports[j];	// set the port for this pulse
-	Pulses[n+4].bit   = Pulses[n].bit   = Bits[j];	// set the bit for this pulse
 	
-	Pulses[n].start   = 1;				// mark the start
-	Pulses[n+4].start = 0;				// mark the end
+	Pulses[n].bit     = Bits[j];			// set the bit mask for this pulse on
+	Pulses[n+4].bit   = ~Bits[j];			// set the bit mask for this pulse off
 
-	Pulses[n+3].nextTime = time + DELAY20 * n + m * PULSE_SCALE;
+	Pulses[n+3].fire = time + DELAY20 * n + m * PULSE_SCALE;
 	if (n < 3) {
-		Pulses[n].nextTime   = time + DELAY20 * (n+1);
+		Pulses[n].fire   = time + DELAY20 * (n+1);
 	} else {
-		Pulses[n+4].nextTime = time + TIME_LONG;
+		Pulses[n+4].fire = time + TIME_LONG;
 	}
 	
 	readSBus();
@@ -682,6 +679,8 @@ void setPulseTimes(uint8_t PulseStateMachine)
 	if (PulseStateMachine == END_PULSES)
 		return;
 	
+	DISABLE_TIMER_INTERRUPT();
+		
 	i = PulseStateMachine * 4;
 	pulsePtr += i;
 	k = i;
@@ -716,49 +715,56 @@ void setPulseTimes(uint8_t PulseStateMachine)
 
 int main(void)
 {
-	uint8_t PulseStateMachine = ONE_TO_FOUR;
 	uint32_t current_micros;
 	uint32_t Last16ChannelsStartTime = 0;
 	uint32_t Last04ChannelsStartTime = 0;
-	uint16_t TCnt;
+	uint16_t TCnt = 0;
+	uint8_t PulseStateMachine = END_PULSES;
 
 	setup();
 	
-	for(;;) {
+	while (1) {
 		readSBus();
 		
 		cli();
 		TCnt = TCNT1;
 		sei();
-		
-		if ((micros() - Last16ChannelsStartTime) > 20000) {		// time for the first 4 pulses
-			if (PulseStateMachine == ONE_TO_FOUR) {
-				Last16ChannelsStartTime += 20000;
-				setPulseTimes(PulseStateMachine);		// first 4 pulses
-				PulseStateMachine = FIVE_TO_EIGHT;
-				Last04ChannelsStartTime = micros();
+
+		if ((TCnt - LastRcv) > T_MS_500) {
+			if (SBusIndex) {
+				if (SBusIndex >= SBUS_PACKET_LEN) {
+					if (processSBusFrame()) {
+						if (SerialMode && PulseOutState == IDLE) {
+							current_micros = micros();
+							uint16_t rate = 17900;						// TODO 17900 or 19900 ?
+							if (EightOnly)
+								rate = 8900;
+							if ((current_micros - Last16ChannelsStartTime ) > rate)
+								Last16ChannelsStartTime = current_micros - 21000;	// will start the pulses
+						}
+					} else {
+						SBusIndex = 0;
+					}
+				} else {
+					if (SBusIndex && (TCnt - LastRcv) > T_MS_3000)
+						SBusIndex = 0;
+				}
 			}
 		}
 		
 		readSBus();
 
-		if ((TCnt - LastRcv) > T_MS_500) {
-			if (SBusIndex >= SBUS_PACKET_LEN) {
-				if (processSBusFrame()) {
-					if (SerialMode && PulseOutState == IDLE) {
-						current_micros = micros();
-						uint16_t rate = 17900;						// TODO 17900 or 19900 ?
-						if (EightOnly)
-							rate = 8900;
-						if ((current_micros - Last16ChannelsStartTime ) > rate)
-							Last16ChannelsStartTime = current_micros - 21000;	// will start the pulses
-					}
-				} else {
-					SBusIndex = 0;
-				}
-			} else {
-				if (SBusIndex && (TCnt - LastRcv) > T_MS_3000)
-					SBusIndex = 0;
+		if (SBusIndex >= SBUS_PACKET_LEN)
+			processSBusFrame();
+			
+		readSBus();
+
+		if ((micros() - Last16ChannelsStartTime) > 20000) {		// time for the first 4 pulses
+			if (PulseStateMachine == END_PULSES) {
+				Last16ChannelsStartTime = micros() + 20000;
+				setPulseTimes(ONE_TO_FOUR);			// first 4 pulses
+				PulseStateMachine = FIVE_TO_EIGHT;
+				Last04ChannelsStartTime = micros();
 			}
 		}
 		
@@ -789,12 +795,12 @@ int main(void)
 		
 		readSBus();
 
-		if (PulseStateMachine == END_PULSES && PulseOutState == IDLE)
-			PulseStateMachine = ONE_TO_FOUR;
+//		if (PulseStateMachine == END_PULSES && PulseOutState == IDLE)
+//			PulseStateMachine = ONE_TO_FOUR;
 
 		if ((millis() - LastSBusReceived) > 500)
 			enterFailsafe();
-		
+
 		if (SBusHasBeenReceived == 0 && ( millis() - LastSBusReceived) > 100) {
 			LastSBusReceived = millis();
 			setSerialMode(!SerialMode);			// toggle mode for auto-detect
