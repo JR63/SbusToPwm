@@ -76,6 +76,8 @@ AD7 -> GND	unused yet
 
 //#define DEBUG
 
+#define SIMULATE_SBUS
+
 
 // Hardware pin mapping
 #define DDR_IO2			DDRD
@@ -154,40 +156,27 @@ AD7 -> GND	unused yet
 #define BIT_ADC5		5
 
 
-#if F_CPU == 16000000L 		// 16MHz clock
+#if F_CPU == 16000000L 		// 16 MHz clock
+#define PULSE_SCALE		16
 #define BAUD_57600		16
 #define BAUD_100000		9
-#define T_MS_3000		48000
-#define T_MS_500		8000
-#define DELAY150		2400
-#define DELAY20			320
-#define DELAY40			640
-#define DELAY60			960
-#define TIME_LONG		40000
-#define PULSE_SCALE		16
-#elif F_CPU == 8000000L		// 8MHz clock
+#elif F_CPU == 8000000L		//  8 MHz clock
+#define PULSE_SCALE		8
 #define BAUD_57600		8
 #define BAUD_100000		4
-#define T_MS_3000		24000
-#define T_MS_500		4000
-#define DELAY150		1200
-#define DELAY20			160
-#define DELAY40			320
-#define DELAY60			480
-#define TIME_LONG		20000
-#define PULSE_SCALE		8
 #endif
 
+#define TIME_LONG		(2500 * PULSE_SCALE)
+#define T_MS_3000		(3000 * PULSE_SCALE)
+#define T_MS_500		( 500 * PULSE_SCALE)
+#define DELAY_CALC		( 150 * PULSE_SCALE)
+#define DELAY_OFFSET		(  20 * PULSE_SCALE)
+
+#define PULSE_MIN		 800
+#define PULSE_MAX		2200
 
 #define IDLE			0	// idle
 #define PULSING			1	// generating PWM pulses
-
-
-#define	ONE_TO_FOUR		0
-#define	FIVE_TO_EIGHT		1
-#define	NINE_TO_TWELVE		2
-#define	THIRTEEN_TO_SIXTEEN	3
-#define	END_PULSES		4
 
 
 #define SBUS_START_BYTE_VALUE	0x0F
@@ -214,6 +203,17 @@ For SBUS_END_BYTE_VALUE mention different endbytes by Futaba FASSTest modes (hig
 
 #define SBUS_BUF_LEN		28
 #define SBUS_BUF_LEN_LAST	27
+
+
+#if 1
+#define PULSE_PACKET_ROUNDS	4
+#define PULSE_PACKET_CNT	4
+#define PULSE_PACKET_CNT_BY_2	8
+#else
+#define PULSE_PACKET_ROUNDS	3
+#define PULSE_PACKET_CNT	6
+#define PULSE_PACKET_CNT_BY_2	12
+#endif
 
 
 #define NUMBER_CHANNELS		16
@@ -270,8 +270,6 @@ uint8_t Bits[NUMBER_CHANNELS] = {
 };
 
 
-static volatile uint16_t LastRcv = 0;
-
 static volatile uint8_t PulseOutState = IDLE;
 
 static uint8_t PulsesIndex = 0;
@@ -279,14 +277,10 @@ static uint8_t PulsesIndex = 0;
 static uint16_t FailsafeTimes[NUMBER_CHANNELS];
 static uint16_t PulseTimes[NUMBER_CHANNELS];
 
-static uint8_t EightOnly = 0;
-static uint8_t ChannelSwap = 0;
-
 static uint8_t SBusBuffer[SBUS_BUF_LEN] = {0};
 static uint8_t SBusIndex = 0;
 
 static uint32_t LastSBusReceived = 0;
-static uint8_t SBusHasBeenReceived = 0;
 
 static uint8_t SerialMode = 1;
 
@@ -447,8 +441,15 @@ void enterFailsafe()
 {
 	uint8_t i;
 	for (i = 0; i < NUMBER_CHANNELS; i++) {
+#if 0
 		PulseTimes[i] = FailsafeTimes[i];
-//		PulseTimes[i] = 800 + i * 85;		// TODO test pattern
+#else
+#ifndef SIMULATE_SBUS
+		PulseTimes[i] = PULSE_MIN + i * 85;		// TODO test pattern
+#else
+		PulseTimes[i] = 1500;				// TODO test pattern
+#endif
+#endif
 	}
 }
 
@@ -535,12 +536,6 @@ void setup(void)
 	initUart();
 	initFailsave();
 
-	if ((PINC & 0x20) == 0)		// AD5 to GND ?
-		ChannelSwap = 1;
-
-	if ((PIND & 0x02) == 0)		// PD1 to GND ?		PD1 ~ TX	TODO check for floating
-		EightOnly = 1;
-
 	sei();
 }
 
@@ -580,9 +575,6 @@ void readSBus()
 		sbus_byte = UDR0;
 		if (SBusIndex || (sbus_byte == SBUS_START_BYTE_VALUE)) {	// if data byte or startbyte
 			SBusBuffer[SBusIndex] = sbus_byte;
-			cli();
-			LastRcv = TCNT1;
-			sei();
 			if (SBusIndex < SBUS_BUF_LEN_LAST)
 				SBusIndex++;
 		}
@@ -592,6 +584,7 @@ void readSBus()
 
 static uint8_t processSBusFrame()
 {
+#ifndef SIMULATE_SBUS
 	uint8_t inputbitsavailable = 0;
 	uint8_t i;
 	uint32_t inputbits = 0;
@@ -630,8 +623,22 @@ static uint8_t processSBusFrame()
 	}
 
 	LastSBusReceived = millis();
-	SBusHasBeenReceived = 1;
 	SBusIndex = 0;
+#else
+	static int8_t off[NUMBER_CHANNELS] = {1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1};
+	uint8_t i;
+	
+	for (i = 0; i < NUMBER_CHANNELS; i++) {
+		if (off[i] == 1) {
+			if (PulseTimes[i] >= PULSE_MAX)
+				off[i] = -1;
+		} else {
+			if (PulseTimes[i] <= PULSE_MIN)
+				off[i] = 1;
+		}
+		PulseTimes[i] = PulseTimes[i] + off[i];
+	}
+#endif
 	
 	return 1;
 }
@@ -658,9 +665,9 @@ void setPulses(uint16_t* times, uint8_t k, uint8_t n, uint16_t time)
 	Pulses[n].bit     = Bits[j];			// set the bit mask for this pulse on
 	Pulses[n+4].bit   = ~Bits[j];			// set the bit mask for this pulse off
 
-	Pulses[n+3].fire = time + DELAY20 * n + m * PULSE_SCALE;
+	Pulses[n+3].fire = time + DELAY_OFFSET * n + m * PULSE_SCALE;
 	if (n < 3) {
-		Pulses[n].fire   = time + DELAY20 * (n+1);
+		Pulses[n].fire   = time + DELAY_OFFSET * (n+1);
 	} else {
 		Pulses[n+4].fire = time + TIME_LONG;
 	}
@@ -673,30 +680,24 @@ void setPulseTimes(uint8_t PulseStateMachine)
 {
 	uint16_t *pulsePtr = PulseTimes;
 	uint16_t times[4];
+	uint16_t time;
 	uint8_t i;
 	uint8_t k;					// offset into Ports and Bits
 	
-	if (PulseStateMachine == END_PULSES)
+	if (PulseStateMachine == PULSE_PACKET_ROUNDS)
 		return;
 	
 	DISABLE_TIMER_INTERRUPT();
 		
-	i = PulseStateMachine * 4;
+	i = PulseStateMachine * PULSE_PACKET_CNT;
 	pulsePtr += i;
 	k = i;
-
-	if (ChannelSwap) {				// swap chanels 1-8 and 9-16
-		if (k >= 8)
-			k -= 8;
-		else
-			k += 8;
-	}
 
 	for (i = 0; i < 4; i++)
 		times[i] = pulsePtr[i];			// local copy of pulses to process
 		
 	cli();
-	uint16_t time = TCNT1 + DELAY150;		// start the pulses in 150 uS
+	time = TCNT1 + DELAY_CALC;			// start the pulses in 150 uS
 	sei();						// gives time for this code to finish
 	
 	for (i = 0; i < 4; i++)
@@ -715,55 +716,32 @@ void setPulseTimes(uint8_t PulseStateMachine)
 
 int main(void)
 {
-	uint32_t current_micros;
 	uint32_t Last16ChannelsStartTime = 0;
 	uint32_t Last04ChannelsStartTime = 0;
-	uint16_t TCnt = 0;
-	uint8_t PulseStateMachine = END_PULSES;
+	uint8_t PulseStateMachine = PULSE_PACKET_ROUNDS;
 
 	setup();
 	
 	while (1) {
 		readSBus();
-		
-		cli();
-		TCnt = TCNT1;
-		sei();
 
-		if ((TCnt - LastRcv) > T_MS_500) {
-			if (SBusIndex) {
-				if (SBusIndex >= SBUS_PACKET_LEN) {
-					if (processSBusFrame()) {
-						if (SerialMode && PulseOutState == IDLE) {
-							current_micros = micros();
-							uint16_t rate = 17900;						// TODO 17900 or 19900 ?
-							if (EightOnly)
-								rate = 8900;
-							if ((current_micros - Last16ChannelsStartTime ) > rate)
-								Last16ChannelsStartTime = current_micros - 21000;	// will start the pulses
-						}
-					} else {
-						SBusIndex = 0;
-					}
-				} else {
-					if (SBusIndex && (TCnt - LastRcv) > T_MS_3000)
-						SBusIndex = 0;
-				}
-			}
-		}
-		
-		readSBus();
-
+#ifndef SIMULATE_SBUS
 		if (SBusIndex >= SBUS_PACKET_LEN)
 			processSBusFrame();
+#endif
 			
 		readSBus();
 
 		if ((micros() - Last16ChannelsStartTime) > 20000) {		// time for the first 4 pulses
-			if (PulseStateMachine == END_PULSES) {
-				Last16ChannelsStartTime = micros() + 20000;
-				setPulseTimes(ONE_TO_FOUR);			// first 4 pulses
-				PulseStateMachine = FIVE_TO_EIGHT;
+			if (PulseStateMachine == PULSE_PACKET_ROUNDS) {
+			
+#ifdef SIMULATE_SBUS
+				processSBusFrame();
+#endif
+
+				PulseStateMachine = 0;
+				setPulseTimes(PulseStateMachine++);		// first pulse set
+				Last16ChannelsStartTime = micros();
 				Last04ChannelsStartTime = micros();
 			}
 		}
@@ -771,40 +749,16 @@ int main(void)
 		readSBus();
 		
 		if ((micros() - Last04ChannelsStartTime) > 3000) {		// time for the next 4 pulses
-			switch (PulseStateMachine) {
-				case FIVE_TO_EIGHT:
-					setPulseTimes(PulseStateMachine);	// second 4 pulses
-					if (EightOnly)
-						PulseStateMachine = END_PULSES;
-					else
-						PulseStateMachine = NINE_TO_TWELVE;
-					Last04ChannelsStartTime = micros();
-				break;
-				case NINE_TO_TWELVE:
-					setPulseTimes(PulseStateMachine);	// third 4 pulses
-					PulseStateMachine = THIRTEEN_TO_SIXTEEN;
-					Last04ChannelsStartTime = micros();
-				break;
-				case THIRTEEN_TO_SIXTEEN:
-					setPulseTimes(PulseStateMachine);	// fourth 4 pulses
-					PulseStateMachine = END_PULSES;
-					Last04ChannelsStartTime = micros();
-				break;
+			if (PulseStateMachine < PULSE_PACKET_ROUNDS) {
+				setPulseTimes(PulseStateMachine++);		// next pulse set
+				Last04ChannelsStartTime = micros();
 			}
 		}
 		
 		readSBus();
 
-//		if (PulseStateMachine == END_PULSES && PulseOutState == IDLE)
-//			PulseStateMachine = ONE_TO_FOUR;
-
-		if ((millis() - LastSBusReceived) > 500)
-			enterFailsafe();
-
-		if (SBusHasBeenReceived == 0 && ( millis() - LastSBusReceived) > 100) {
-			LastSBusReceived = millis();
-			setSerialMode(!SerialMode);			// toggle mode for auto-detect
-		}
+//		if ((millis() - LastSBusReceived) > 500)
+//			enterFailsafe();
 		
 		readSBus();
 		
