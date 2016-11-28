@@ -76,7 +76,7 @@ AD7 -> GND	unused yet
 
 //#define DEBUG
 
-#define SIMULATE_SBUS
+//#define SIMULATE_SBUS
 
 
 // Hardware pin mapping
@@ -199,6 +199,9 @@ For SBUS_END_BYTE_VALUE mention different endbytes by Futaba FASSTest modes (hig
 #define SBUS_END_BYTE_VALUE	0x00
 #define SBUS_END_BYTE_INDEX	24
 
+#define SBUS_CH_17_MASK		0x80		// TODO or 0x01
+#define SBUS_CH_18_MASK		0x40		// TODO or 0x02
+
 #define SBUS_PACKET_LEN		25
 
 #define SBUS_BUF_LEN		28
@@ -216,7 +219,12 @@ For SBUS_END_BYTE_VALUE mention different endbytes by Futaba FASSTest modes (hig
 #endif
 
 
+#define CHANNEL_17_INDEX	16
+#define CHANNEL_18_INDEX	17
 #define NUMBER_CHANNELS		16
+
+
+#define PULSE_SET_OFFSET	(PULSE_MAX + PULSE_PACKET_CNT * (DELAY_OFFSET / PULSE_SCALE))
 
 
 #define ENABLE_TIMER_INTERRUPT()	(TIMSK1 |= (1 << OCIE1A))
@@ -228,7 +236,7 @@ struct t_pulses {
 	uint8_t *port;
 	uint8_t bit;
 	uint16_t fire;
-} Pulses[8];
+} Pulses[PULSE_PACKET_CNT_BY_2];
 
 
 uint8_t* Ports[NUMBER_CHANNELS] = {
@@ -289,16 +297,16 @@ static uint8_t SerialMode = 1;
 
 ISR(TIMER1_COMPA_vect)
 {
-	if (PulsesIndex < 8) {
+	if (PulsesIndex < PULSE_PACKET_CNT_BY_2) {
 		t_pulses *p = &Pulses[PulsesIndex];
 		OCR1A = p->fire;		// next shot
-		if (PulsesIndex++ < 4)		// if start
+		if (PulsesIndex++ < PULSE_PACKET_CNT)		// if start
 			*p->port |= p->bit;	//   set the output
 		else				// if stop
 			*p->port &= p->bit;	//   clear the output
 	}
 		
-	if (PulsesIndex >= 8) {
+	if (PulsesIndex >= PULSE_PACKET_CNT_BY_2) {
 		DISABLE_TIMER_INTERRUPT();	// 4 pulses are finished
 		PulseOutState = IDLE;
 	}
@@ -462,7 +470,7 @@ void initFailsave()
 	readFailsafe();
 	
 	for (i = 0; i < NUMBER_CHANNELS; i++) {
-		if ((FailsafeTimes[i] < 800 ) || (FailsafeTimes[i] > 2200)) {
+		if ((FailsafeTimes[i] < PULSE_MIN ) || (FailsafeTimes[i] > PULSE_MAX)) {
 			FailsafeTimes[i] = 1500;
 			updateFailsafe = 1;
 		}
@@ -615,7 +623,7 @@ static uint8_t processSBusFrame()
 			inputbitsavailable += 8;
 		}
 		pulse = ((int16_t)(inputbits & 0x7FF) - 0x3E0) * 5 / 8 + 1500;
-		if ((pulse > 800) && (pulse < 2200))
+		if ((pulse > PULSE_MIN) && (pulse < PULSE_MAX))
 			PulseTimes[i] = pulse;
 			
 		inputbitsavailable -= 11;
@@ -651,7 +659,7 @@ void setPulses(uint16_t* times, uint8_t k, uint8_t n, uint16_t time)
 	uint8_t j = 0;
 	
 	m = times[j];
-	for (i = 1; i < 4; i++) {			// find next shortest pulse
+	for (i = 1; i < PULSE_PACKET_CNT; i++) {	// find next shortest pulse
 		if (times[i] < m) {			// if this one is shorter
 			j = i;
 			m = times[j];
@@ -660,16 +668,17 @@ void setPulses(uint16_t* times, uint8_t k, uint8_t n, uint16_t time)
 	times[j] = 0xFFFF;				// mark as done
 	j += k;						// add offset
 	
-	Pulses[n+4].port  = Pulses[n].port  = Ports[j];	// set the port for this pulse
-	
-	Pulses[n].bit     = Bits[j];			// set the bit mask for this pulse on
-	Pulses[n+4].bit   = ~Bits[j];			// set the bit mask for this pulse off
+	Pulses[n].port = Ports[j];			// set the port for this pulse
+	Pulses[n + PULSE_PACKET_CNT].port = Ports[j];	// set the port for this pulse
 
-	Pulses[n+3].fire = time + DELAY_OFFSET * n + m * PULSE_SCALE;
-	if (n < 3) {
-		Pulses[n].fire   = time + DELAY_OFFSET * (n+1);
+	Pulses[n].bit = Bits[j];			// set the bit mask for this pulse on
+	Pulses[n + PULSE_PACKET_CNT].bit = ~Bits[j];	// set the bit mask for this pulse off
+
+	Pulses[n + PULSE_PACKET_CNT - 1].fire = time + DELAY_OFFSET * n + m * PULSE_SCALE;
+	if (n < (PULSE_PACKET_CNT - 1)) {
+		Pulses[n].fire = time + DELAY_OFFSET * (n+1);
 	} else {
-		Pulses[n+4].fire = time + TIME_LONG;
+		Pulses[n + PULSE_PACKET_CNT].fire = time + TIME_LONG;
 	}
 	
 	readSBus();
@@ -679,7 +688,7 @@ void setPulses(uint16_t* times, uint8_t k, uint8_t n, uint16_t time)
 void setPulseTimes(uint8_t PulseStateMachine)
 {
 	uint16_t *pulsePtr = PulseTimes;
-	uint16_t times[4];
+	uint16_t times[PULSE_PACKET_CNT];
 	uint16_t time;
 	uint8_t i;
 	uint8_t k;					// offset into Ports and Bits
@@ -688,19 +697,19 @@ void setPulseTimes(uint8_t PulseStateMachine)
 		return;
 	
 	DISABLE_TIMER_INTERRUPT();
-		
+	
 	i = PulseStateMachine * PULSE_PACKET_CNT;
 	pulsePtr += i;
 	k = i;
-
+	
 	for (i = 0; i < 4; i++)
 		times[i] = pulsePtr[i];			// local copy of pulses to process
-		
+	
 	cli();
 	time = TCNT1 + DELAY_CALC;			// start the pulses in 150 uS
 	sei();						// gives time for this code to finish
 	
-	for (i = 0; i < 4; i++)
+	for (i = 0; i < PULSE_PACKET_CNT; i++)
 		setPulses(times, k, i, time);		// set the pulses
 	
 	cli();
