@@ -73,7 +73,7 @@ AD6 -> GND	set current values to failsave
 
 //#define DEBUG
 
-#define SIMULATE_SBUS
+//#define SIMULATE_SBUS
 
 
 // Hardware pin mapping
@@ -167,7 +167,7 @@ AD6 -> GND	set current values to failsave
 #define T_MS_3000		(3000 * PULSE_SCALE)
 #define T_MS_500		( 500 * PULSE_SCALE)
 #define DELAY_CALC		( 150 * PULSE_SCALE)
-#define DELAY_OFFSET		(  20 * PULSE_SCALE)
+#define DELAY_OFFSET		(  10 * PULSE_SCALE)
 
 #define PULSE_MIN		 800
 #define PULSE_MAX		2200
@@ -205,7 +205,7 @@ For SBUS_END_BYTE_VALUE mention different endbytes by Futaba FASSTest modes (hig
 #define SBUS_BUF_LEN_LAST	27
 
 
-#if 1
+#if 0
 #define PULSE_PACKET_ROUNDS	4
 #define PULSE_PACKET_CNT	4
 #define PULSE_PACKET_CNT_BY_2	8
