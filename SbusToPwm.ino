@@ -61,12 +61,9 @@ Inverter:
 
 
 AD4 -> GND	set current values to failsave
-AD5 -> GND	channel 1-8 and 9-16 are swapped
-TX  -> GND	via 1k only 8 channel every 9 ms
 
 maybe later, but needs external pull up
-AD6 -> GND	only 8 channel every 9 ms
-AD7 -> GND	unused yet
+AD6 -> GND	set current values to failsave
 
 */
 
@@ -76,7 +73,7 @@ AD7 -> GND	unused yet
 
 //#define DEBUG
 
-//#define SIMULATE_SBUS
+#define SIMULATE_SBUS
 
 
 // Hardware pin mapping
@@ -221,7 +218,7 @@ For SBUS_END_BYTE_VALUE mention different endbytes by Futaba FASSTest modes (hig
 
 #define CHANNEL_17_INDEX	16
 #define CHANNEL_18_INDEX	17
-#define NUMBER_CHANNELS		16
+#define NUMBER_CHANNELS		18
 
 
 #define PULSE_SET_OFFSET	(PULSE_MAX + PULSE_PACKET_CNT * (DELAY_OFFSET / PULSE_SCALE))
@@ -255,7 +252,9 @@ uint8_t* Ports[NUMBER_CHANNELS] = {
 	(uint8_t*) &PORT_ADC0,
 	(uint8_t*) &PORT_ADC1,
 	(uint8_t*) &PORT_ADC2,
-	(uint8_t*) &PORT_ADC3
+	(uint8_t*) &PORT_ADC3,
+	(uint8_t*) &PORT_ADC4,
+	(uint8_t*) &PORT_ADC5
 };
 
 uint8_t Bits[NUMBER_CHANNELS] = {
@@ -274,7 +273,9 @@ uint8_t Bits[NUMBER_CHANNELS] = {
 	1 << BIT_ADC0,
 	1 << BIT_ADC1,
 	1 << BIT_ADC2,
-	1 << BIT_ADC3
+	1 << BIT_ADC3,
+	1 << BIT_ADC4,
+	1 << BIT_ADC5
 };
 
 
@@ -299,15 +300,15 @@ ISR(TIMER1_COMPA_vect)
 {
 	if (PulsesIndex < PULSE_PACKET_CNT_BY_2) {
 		t_pulses *p = &Pulses[PulsesIndex];
-		OCR1A = p->fire;		// next shot
-		if (PulsesIndex++ < PULSE_PACKET_CNT)		// if start
-			*p->port |= p->bit;	//   set the output
-		else				// if stop
-			*p->port &= p->bit;	//   clear the output
+		OCR1A = p->fire;			// next shot
+		if (PulsesIndex++ < PULSE_PACKET_CNT)	// if start
+			*p->port |= p->bit;		//   set the output
+		else					// if stop
+			*p->port &= p->bit;		//   clear the output
 	}
-		
+	
 	if (PulsesIndex >= PULSE_PACKET_CNT_BY_2) {
-		DISABLE_TIMER_INTERRUPT();	// 4 pulses are finished
+		DISABLE_TIMER_INTERRUPT();		// pulses are finished
 		PulseOutState = IDLE;
 	}
 }
@@ -452,10 +453,10 @@ void enterFailsafe()
 #if 0
 		PulseTimes[i] = FailsafeTimes[i];
 #else
-#ifndef SIMULATE_SBUS
-		PulseTimes[i] = PULSE_MIN + i * 85;		// TODO test pattern
-#else
+#ifdef SIMULATE_SBUS
 		PulseTimes[i] = 1500;				// TODO test pattern
+#else
+		PulseTimes[i] = PULSE_MIN + i * 85;		// TODO test pattern
 #endif
 #endif
 	}
@@ -592,7 +593,28 @@ void readSBus()
 
 static uint8_t processSBusFrame()
 {
-#ifndef SIMULATE_SBUS
+#ifdef SIMULATE_SBUS
+
+#define SIMULATE_STEP_WIDTH	1
+
+	static int8_t off[NUMBER_CHANNELS] = {+1, -1, +1, -1, +1, -1, +1, -1, +1, -1, +1, -1, +1, -1, +1, -1, +1, -1};
+	static uint32_t last_processed = 0;
+	uint8_t i;
+	
+	if ((micros() - last_processed) > 20000) {	
+		last_processed = micros();
+		for (i = 0; i < NUMBER_CHANNELS; i++) {
+			if (off[i] == 1) {
+				if (PulseTimes[i] >= PULSE_MAX)
+					off[i] = -1;
+			} else {
+				if (PulseTimes[i] <= PULSE_MIN)
+					off[i] = +1;
+			}
+			PulseTimes[i] = PulseTimes[i] + (off[i] * SIMULATE_STEP_WIDTH);
+		}
+	}
+#else	// SIMULATE_SBUS
 	uint8_t inputbitsavailable = 0;
 	uint8_t i;
 	uint32_t inputbits = 0;
@@ -617,7 +639,7 @@ static uint8_t processSBusFrame()
 	PORTC ^= 0x20;
 #endif
 
-	for (i = 0; i < NUMBER_CHANNELS; i++) {
+	for (i = 0; i < NUMBER_CHANNELS - 2; i++) {
 		while (inputbitsavailable < 11) {
 			inputbits |= (uint32_t)*sbus++ << inputbitsavailable;
 			inputbitsavailable += 8;
@@ -630,23 +652,19 @@ static uint8_t processSBusFrame()
 		inputbits >>= 11;
 	}
 
+	if (*sbus & SBUS_CH_17_MASK)
+		PulseTimes[CHANNEL_17_INDEX] = 2200;
+	else
+		PulseTimes[CHANNEL_17_INDEX] =  800;
+		
+	if (*sbus & SBUS_CH_18_MASK)
+		PulseTimes[CHANNEL_18_INDEX] = 2200;
+	else
+		PulseTimes[CHANNEL_18_INDEX] =  800;
+#endif	// SIMULATE_SBUS
+
 	LastSBusReceived = millis();
 	SBusIndex = 0;
-#else
-	static int8_t off[NUMBER_CHANNELS] = {1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1};
-	uint8_t i;
-	
-	for (i = 0; i < NUMBER_CHANNELS; i++) {
-		if (off[i] == 1) {
-			if (PulseTimes[i] >= PULSE_MAX)
-				off[i] = -1;
-		} else {
-			if (PulseTimes[i] <= PULSE_MIN)
-				off[i] = 1;
-		}
-		PulseTimes[i] = PulseTimes[i] + off[i];
-	}
-#endif
 	
 	return 1;
 }
@@ -702,19 +720,19 @@ void setPulseTimes(uint8_t PulseStateMachine)
 	pulsePtr += i;
 	k = i;
 	
-	for (i = 0; i < 4; i++)
+	for (i = 0; i < PULSE_PACKET_CNT; i++)
 		times[i] = pulsePtr[i];			// local copy of pulses to process
 	
 	cli();
-	time = TCNT1 + DELAY_CALC;			// start the pulses in 150 uS
+	time = TCNT1 + DELAY_CALC;			// start the pulses after calculation
 	sei();						// gives time for this code to finish
 	
 	for (i = 0; i < PULSE_PACKET_CNT; i++)
 		setPulses(times, k, i, time);		// set the pulses
-	
+		
 	cli();
 	OCR1A = time;					// set for first interrupt
-	sei();
+	sei();						// gives time for this code to finish
 	
 	CLEAR_TIMER_INTERRUPT();			// clear flag in case it is set
 	PulsesIndex = 0;				// start here
@@ -733,21 +751,18 @@ int main(void)
 	
 	while (1) {
 		readSBus();
-
-#ifndef SIMULATE_SBUS
+		
+#ifdef SIMULATE_SBUS
+		processSBusFrame();
+#else
 		if (SBusIndex >= SBUS_PACKET_LEN)
 			processSBusFrame();
 #endif
-			
+		
 		readSBus();
-
-		if ((micros() - Last16ChannelsStartTime) > 20000) {		// time for the first 4 pulses
+		
+		if ((micros() - Last16ChannelsStartTime) > 20000) {		// time for the first pulse set
 			if (PulseStateMachine == PULSE_PACKET_ROUNDS) {
-			
-#ifdef SIMULATE_SBUS
-				processSBusFrame();
-#endif
-
 				PulseStateMachine = 0;
 				setPulseTimes(PulseStateMachine++);		// first pulse set
 				Last16ChannelsStartTime = micros();
@@ -757,7 +772,7 @@ int main(void)
 		
 		readSBus();
 		
-		if ((micros() - Last04ChannelsStartTime) > 3000) {		// time for the next 4 pulses
+		if ((micros() - Last04ChannelsStartTime) > PULSE_SET_OFFSET) {	// time for the next pulse set
 			if (PulseStateMachine < PULSE_PACKET_ROUNDS) {
 				setPulseTimes(PulseStateMachine++);		// next pulse set
 				Last04ChannelsStartTime = micros();
@@ -765,11 +780,9 @@ int main(void)
 		}
 		
 		readSBus();
-
-//		if ((millis() - LastSBusReceived) > 500)
-//			enterFailsafe();
 		
-		readSBus();
+		if ((millis() - LastSBusReceived) > 500)
+			enterFailsafe();
 		
 		checkFailsafePin();
 	}
